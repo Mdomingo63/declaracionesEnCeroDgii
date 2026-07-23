@@ -1,3 +1,27 @@
+"""
+declaracionCeroDgii.py
+
+Presenta declaraciones en cero (IR3, 606, 607, ITBIS) para una lista de
+usuarios en la Oficina Virtual de la DGII.
+
+Las claves de acceso YA NO están escritas en este archivo. Se leen en
+tiempo de ejecución desde el keyring del sistema operativo (Keychain en
+macOS, Credential Manager en Windows, Secret Service/KWallet en Linux),
+usando el mismo "servicio" (namespace) con el que fueron guardadas por
+setup_credenciales_dgii.py.
+
+Requisitos:
+    pip install selenium webdriver-manager keyring
+
+Antes de correr este script por primera vez, ejecuta:
+    python setup_credenciales_dgii.py
+para registrar las claves en el keyring de esta máquina.
+"""
+
+import json
+import sys
+import keyring
+from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select, WebDriverWait
@@ -8,26 +32,58 @@ from datetime import datetime, timedelta
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
 
-usuarios = [
-    {"rnc": "00109491563", "clave": "aespinal63"},
-    {"rnc": "501481808", "clave": "aperez08"},
-    {"rnc": "00107853400", "clave": "cmota400"},
-    {"rnc": "00108331513", "clave": "LULY5555"}, 
-    {"rnc": "00112183710", "clave": "frank710"},
-    {"rnc": "101594918", "clave": "hfagf"},
-    {"rnc": "00105730089", "clave": "BwjM3bmOG89"},
-    {"rnc": "101535393", "clave": "aetla"},
-    {"rnc": "00117924779", "clave": "jvhr79"},
-    {"rnc": "00105517940", "clave": "jbr21"}, 
-    {"rnc": "22301207787", "clave": "javilla87"},  
-    {"rnc": "132965701", "clave": "QADR5701"},
-    {"rnc": "00109598946", "clave": "Margom3737"},
-    {"rnc": "00114646516", "clave": "mfdl16"},
-    {"rnc": "00116144742", "clave": "1n3fKXaa4Z742"},
-    {"rnc": "00109465617", "clave": "Rcastillo17"},
-    {"rnc": "00113180574", "clave": "w628HVRXh74"},
-    {"rnc": "531597862", "clave": "YENI0062"}
-]
+# Namespace usado en el keyring (debe coincidir con setup_credenciales_dgii.py)
+SERVICIO = "dgii_ofv"
+
+# La lista de RNCs vive en un archivo aparte (config_rncs.json), fuera del
+# código fuente y fuera de git (ver .gitignore), porque aunque el RNC no es
+# un secreto de seguridad, revela qué clientes maneja este despacho.
+# Las claves NO están en ningún archivo: se recuperan del keyring del
+# sistema operativo en tiempo de ejecución con keyring.get_password().
+ARCHIVO_RNCS = Path(__file__).parent / "config_rncs.json"
+
+
+def cargar_rncs():
+    if not ARCHIVO_RNCS.exists():
+        print(f"❌ No se encontró {ARCHIVO_RNCS.name}. Crea ese archivo con la lista de RNCs, por ejemplo:")
+        print('   ["00109491563", "501481808", ...]')
+        sys.exit(1)
+
+    with open(ARCHIVO_RNCS, encoding="utf-8") as f:
+        return json.load(f)
+
+
+RNCS = cargar_rncs()
+
+
+def cargar_usuarios():
+    """
+    Construye la lista de usuarios a procesar, recuperando cada clave
+    desde el keyring del sistema. Si a algún RNC le falta la clave
+    guardada, se avisa y se omite (no se detiene todo el proceso).
+    """
+    usuarios = []
+    faltantes = []
+
+    for rnc in RNCS:
+        clave = keyring.get_password(SERVICIO, rnc)
+        if clave is None:
+            faltantes.append(rnc)
+            continue
+        usuarios.append({"rnc": rnc, "clave": clave})
+
+    if faltantes:
+        print("⚠️  No se encontró clave guardada en el keyring para estos RNC (se omitirán):")
+        for rnc in faltantes:
+            print(f"   - {rnc}")
+        print("   Ejecuta setup_credenciales_dgii.py para registrarlas.\n")
+
+    if not usuarios:
+        print("❌ No hay credenciales disponibles. Nada que procesar.")
+        sys.exit(1)
+
+    return usuarios
+
 
 hoy = datetime.now()
 mes_anterior = hoy.replace(day=1) - timedelta(days=1)
@@ -156,6 +212,7 @@ def procesar_mensajes_dgii(driver):
     except Exception as e:
         print(f"⚠️ Error procesando mensajes DGII: {e}")
 
+
 def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
     # Verificar que el menú esté disponible y hacer clic
     try:
@@ -209,81 +266,89 @@ def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
         except Exception as e:
             print(f"⚠️  No se pudo regresar al menú principal: {e}")
 
-options = webdriver.ChromeOptions()
-options.add_argument("--start-maximized")
 
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-driver.get("https://dgii.gov.do/OFV/login.aspx")
+def main():
+    usuarios = cargar_usuarios()
 
-for user in usuarios:
-    try:
-        print(f"🔐 Iniciando sesión con RNC: {user['rnc']}")
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
 
-        # Ir siempre a la página de login antes de cada usuario
-        driver.get("https://dgii.gov.do/OFV/login.aspx")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver.get("https://dgii.gov.do/OFV/login.aspx")
+
+    for user in usuarios:
         try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-            )
-        except Exception as e:
-            print(f"❌ No se encontró campo usuario para RNC {user['rnc']}: {e}")
-            continue
+            print(f"🔐 Iniciando sesión con RNC: {user['rnc']}")
 
-        driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").clear()
-        driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").send_keys(user["rnc"])
-        driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").clear()
-        driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").send_keys(user["clave"])
-        driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_BtnAceptar").click()
-
-        # Si aparece popup, cerrarlo
-        procesar_mensajes_dgii(driver)
-
-        # Verificar si el login fue exitoso
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "2187"))
-            )
-        except Exception as e:
-            print(f"❌ Login fallido para RNC {user['rnc']}: {e}")
-            continue
-
-        # Paso 1: IR3
-        presentar_declaracion(driver, index_impuesto=1)
-
-        # Paso 2: 606
-        presentar_declaracion(driver, index_impuesto=3)
-
-        # Paso 3: 607
-        presentar_declaracion(driver, index_impuesto=4)
-
-        # Paso 4: ITBIS (NO escribir período, solo hacer clic en presentar)
-        presentar_declaracion(driver, index_impuesto=2, escribir_periodo=False)
-
-        # Cerrar sesión
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, '//*[@id="menus"]/li[5]/a'))
-            ).click()
-        except Exception as e:
-            print(f"⚠️  No se pudo cerrar sesión para RNC {user['rnc']}: {e}")
-
-        # Esperar a que vuelva la pantalla de login antes de continuar con el siguiente usuario
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-            )
-        except Exception as e:
-            print(f"⚠️  No volvió a la pantalla de login para RNC {user['rnc']}: {e}")
-
-    except Exception as e:
-        print(f"❌ Error general con RNC {user['rnc']}: {e}")
-        try:
+            # Ir siempre a la página de login antes de cada usuario
             driver.get("https://dgii.gov.do/OFV/login.aspx")
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-            )
-        except:
-            pass
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
+                )
+            except Exception as e:
+                print(f"❌ No se encontró campo usuario para RNC {user['rnc']}: {e}")
+                continue
 
-driver.quit()
-print("✅ Proceso completado.")
+            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").clear()
+            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").send_keys(user["rnc"])
+            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").clear()
+            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").send_keys(user["clave"])
+            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_BtnAceptar").click()
+
+            # Si aparece popup, cerrarlo
+            procesar_mensajes_dgii(driver)
+
+            # Verificar si el login fue exitoso
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "2187"))
+                )
+            except Exception as e:
+                print(f"❌ Login fallido para RNC {user['rnc']}: {e}")
+                continue
+
+            # Paso 1: IR3
+            presentar_declaracion(driver, index_impuesto=1)
+
+            # Paso 2: 606
+            presentar_declaracion(driver, index_impuesto=3)
+
+            # Paso 3: 607
+            presentar_declaracion(driver, index_impuesto=4)
+
+            # Paso 4: ITBIS (NO escribir período, solo hacer clic en presentar)
+            presentar_declaracion(driver, index_impuesto=2, escribir_periodo=False)
+
+            # Cerrar sesión
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="menus"]/li[5]/a'))
+                ).click()
+            except Exception as e:
+                print(f"⚠️  No se pudo cerrar sesión para RNC {user['rnc']}: {e}")
+
+            # Esperar a que vuelva la pantalla de login antes de continuar con el siguiente usuario
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
+                )
+            except Exception as e:
+                print(f"⚠️  No volvió a la pantalla de login para RNC {user['rnc']}: {e}")
+
+        except Exception as e:
+            print(f"❌ Error general con RNC {user['rnc']}: {e}")
+            try:
+                driver.get("https://dgii.gov.do/OFV/login.aspx")
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
+                )
+            except Exception:
+                pass
+
+    driver.quit()
+    print("✅ Proceso completado.")
+
+
+if __name__ == "__main__":
+    main()

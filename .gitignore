@@ -1,19 +1,21 @@
-# Entornos virtuales
+# Lista de RNCs de clientes: no es un secreto de seguridad, pero revela
+# información comercial confidencial (quiénes son los clientes), así que
+# no se sube al repositorio.
+config_rncs.json
+
+
+# Entornos virtuales de Python
+.venv/
 venv/
-env/
-ENV/
-
-# Configuración de VS Code
-.vscode/
-
-# Archivos de caché de Python
 __pycache__/
-*.py[cod]
+*.pyc
 
-# Archivos temporales o de sistema operativo
-.DS_Store
-Thumbs.db
+# Archivos de entorno, por si se usan en el futuro
+.env
 
-# Archivos de compilación y distribución
-build/
-dist/
+# Drivers descargados por webdriver-manager (se regeneran solos)
+.wdm/
+
+# Archivos de distribución y construcción
+dist
+buid
