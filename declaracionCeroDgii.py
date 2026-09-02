@@ -108,139 +108,95 @@ def obtener_numero_badge(elemento):
 
 
 def procesar_mensajes_dgii(driver):
-    """Verifica primero el popup de mensajes y luego las notificaciones del usuario."""
+    """Procesa notificaciones y mensajes pendientes después del login."""
     try:
-        # 1) Comprobar si aparece el popup con lblMensaje
         try:
             mensaje = WebDriverWait(driver, 8).until(
                 EC.visibility_of_element_located((By.XPATH, '//*[@id="lblMensaje"]'))
             )
             print(f"📢 Mensaje DGII: {mensaje.text}")
-            driver.find_element(By.XPATH, '//*[@id="cboxClose"]').click()
+            WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, '//*[@id="cboxClose"]'))
+            ).click()
             print("✅ Popup cerrado")
-
-            # 2) Una vez cerrado, comprobar el botón de notificaciones
-            try:
-                badge_notificacion = WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeNotificacion"]'))
-                )
-                cantidad = obtener_numero_badge(badge_notificacion)
-                print(f"🔔 Notificaciones pendientes: {cantidad}")
-
-                while cantidad > 0:
-                    try:
-                        primer_mensaje = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable(
-                                (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_Enlace_47245731"]')
-                            )
-                        )
-                        primer_mensaje.click()
-                    except Exception as e:
-                        print(f"⚠️ No se pudo abrir el primer mensaje de notificaciones: {e}")
-                        break
-
-                    try:
-                        btn_siguiente = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]'))
-                        )
-                        btn_siguiente.click()
-                    except Exception as e:
-                        print(f"⚠️ No se pudo avanzar al siguiente mensaje: {e}")
-                        break
-
-                    try:
-                        badge_notificacion = WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeNotificacion"]'))
-                        )
-                        cantidad = obtener_numero_badge(badge_notificacion)
-                        print(f"🔔 Notificaciones pendientes: {cantidad}")
-                    except Exception:
-                        cantidad = 0
-                        break
-
-                print("✅ Verificación de notificaciones finalizada")
-            except TimeoutException:
-                print("ℹ️ No hay botón de notificaciones visible para este usuario")
-
         except TimeoutException:
-            print("ℹ️ No apareció el popup lblMensaje; se continúa con la verificación del otro mensaje.")
+            print("ℹ️ No apareció el popup lblMensaje")
 
-        # 3) Verificación del flujo actual de mensajes (siempre se ejecuta cuando no aparece popup)
         try:
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_GVMensajes"))
+            badge_notificacion = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeNotificacion"]')
+                )
             )
         except TimeoutException:
-            print("ℹ️ No apareció la grilla de mensajes para este usuario.")
-            return
+            badge_notificacion = None
 
-        while True:
-            try:
-                badge = driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_badgeTodos")
-            except Exception:
-                break
-
-            pendientes = obtener_numero_badge(badge)
-            print(f"📨 Mensajes pendientes: {pendientes}")
-
-            if pendientes <= 0:
-                break
-
-            try:
-                mensajes = driver.find_elements(By.CSS_SELECTOR, "a.enlace-asunto")
-                if not mensajes:
-                    break
-
-                mensajes[0].click()
+        if badge_notificacion is not None:
+            cantidad = obtener_numero_badge(badge_notificacion)
+            print(f"🔔 Notificaciones pendientes: {cantidad}")
+            while cantidad > 0:
                 WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnTodosMensajes"))
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_Enlace_47245731"]'))
                 ).click()
                 WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_GVMensajes"))
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]'))
+                ).click()
+                cantidad = obtener_numero_badge(
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeNotificacion"]'))
+                    )
                 )
-            except Exception as e:
-                print(f"⚠️ No se pudo recorrer el listado de mensajes: {e}")
-                break
+                print(f"🔔 Notificaciones pendientes: {cantidad}")
+            print("✅ Verificación de notificaciones finalizada")
 
-        print("✅ Se revisó el listado de mensajes del usuario")
-
-        # 4) Eliminar mensajes si son eliminables
         try:
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_btnTodosMensajes").click()
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_tablaTextoTipoMensaje"]/tbody/tr/td[1]/input')
-                )
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, '//*[@id="alert"]/a/div[2]'))
             )
-
-            checkbox = driver.find_element(
-                By.XPATH,
-                '//*[@id="ctl00_ContentPlaceHolder1_tablaTextoTipoMensaje"]/tbody/tr/td[1]/input'
-            )
-            if not checkbox.is_selected():
-                checkbox.click()
-
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_btnEliminarTodos").click()
-
-            try:
-                WebDriverWait(driver, 3).until(EC.alert_is_present())
-                driver.switch_to.alert.accept()
-                print("✅ Alerta de confirmación aceptada")
-            except TimeoutException:
-                ActionChains(driver).send_keys(Keys.ENTER).perform()
-                print("✅ Enter enviado para confirmar eliminación")
-
-            print("🗑️ Mensajes eliminados")
-
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, '//*[@id="menus"]/li[1]/a'))
-            ).click()
-            print("🏠 Regresando al inicio")
-
         except TimeoutException:
-            print("ℹ️ No aparecieron mensajes eliminables para este usuario")
-        except Exception as e:
-            print(f"⚠️ Error eliminando mensajes: {e}")
+            print("ℹ️ No hay mensajes pendientes para este usuario")
+            return
+
+        badge_mensajes = WebDriverWait(driver, 8).until(
+            EC.presence_of_element_located((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'))
+        )
+        cantidad = obtener_numero_badge(badge_mensajes)
+        print(f"📨 Mensajes pendientes: {cantidad}")
+        if cantidad > 0:
+            WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnMensaje"]'))
+            ).click()
+            while cantidad > 0:
+                WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_Enlace_47351055"]'))
+                ).click()
+                WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]/span'))
+                ).click()
+                cantidad = obtener_numero_badge(
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'))
+                    )
+                )
+                print(f"📨 Mensajes pendientes: {cantidad}")
+
+        WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnTodosMensajes"]'))
+        ).click()
+        checkbox = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_tablaTextoTipoMensaje"]/tbody/tr/td[1]/input'))
+        )
+        if not checkbox.is_selected():
+            checkbox.click()
+        WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnEliminarTodos"]'))
+        ).click()
+        try:
+            WebDriverWait(driver, 3).until(EC.alert_is_present())
+            driver.switch_to.alert.accept()
+        except TimeoutException:
+            ActionChains(driver).send_keys(Keys.ENTER).perform()
+        print("🗑️ Mensajes eliminados")
 
     except Exception as e:
         print(f"⚠️ Error procesando mensajes DGII: {e}")
@@ -307,8 +263,6 @@ def main():
     options.add_argument("--start-maximized")
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    driver.get("https://dgii.gov.do/OFV/login.aspx")
-
     for user in usuarios:
         try:
             print(f"🔐 Iniciando sesión con RNC: {user['rnc']}")
@@ -329,9 +283,6 @@ def main():
             driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").send_keys(user["clave"])
             driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_BtnAceptar").click()
 
-            # Si aparece popup, cerrarlo
-            procesar_mensajes_dgii(driver)
-
             # Verificar si el login fue exitoso
             try:
                 WebDriverWait(driver, 10).until(
@@ -340,6 +291,9 @@ def main():
             except Exception as e:
                 print(f"❌ Login fallido para RNC {user['rnc']}: {e}")
                 continue
+
+            # Procesar mensajes únicamente después de confirmar el login.
+            procesar_mensajes_dgii(driver)
 
             # Paso 1: IR3
             presentar_declaracion(driver, index_impuesto=1)
