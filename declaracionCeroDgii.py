@@ -36,21 +36,25 @@ from selenium.webdriver.common.action_chains import ActionChains
 # Namespace usado en el keyring (debe coincidir con setup_credenciales_dgii.py)
 SERVICIO = "dgii_ofv"
 
-# La lista de RNCs vive en un archivo aparte (config_rncs.json), fuera del
-# código fuente y fuera de git (ver .gitignore), porque aunque el RNC no es
-# un secreto de seguridad, revela qué clientes maneja este despacho.
-# Las claves NO están en ningún archivo: se recuperan del keyring del
-# sistema operativo en tiempo de ejecución con keyring.get_password().
+# La lista de RNCs vive en un archivo aparte, fuera del código fuente y fuera
+# de git (ver .gitignore), porque aunque el RNC no es un secreto de seguridad,
+# revela qué clientes maneja este despacho. Aceptamos ambos nombres para no
+# romper proyectos antiguos que usaban "config_rnc.json".
+# Las claves NO están en ningún archivo: se recuperan del keyring del sistema
+# operativo en tiempo de ejecución con keyring.get_password().
 ARCHIVO_RNCS = Path(__file__).parent / "config_rncs.json"
+ARCHIVO_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
 
 
 def cargar_rncs():
-    if not ARCHIVO_RNCS.exists():
-        print(f"❌ No se encontró {ARCHIVO_RNCS.name}. Crea ese archivo con la lista de RNCs, por ejemplo:")
+    archivo = ARCHIVO_RNC_LEGACY if ARCHIVO_RNC_LEGACY.exists() else ARCHIVO_RNCS
+
+    if not archivo.exists():
+        print(f"❌ No se encontró config_rnc.json ni config_rncs.json. Crea uno con la lista de RNCs, por ejemplo:")
         print('   ["00109491563", "501481808", ...]')
         sys.exit(1)
 
-    with open(ARCHIVO_RNCS, encoding="utf-8") as f:
+    with open(archivo, encoding="utf-8") as f:
         return json.load(f)
 
 

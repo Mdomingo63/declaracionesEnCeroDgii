@@ -27,20 +27,24 @@ from pathlib import Path
 # No es secreto, solo es un namespace dentro del keyring.
 SERVICIO = "dgii_ofv"
 
-# La lista de RNCs vive en un archivo aparte (config_rncs.json), fuera del
-# código fuente. El RNC no es un secreto de seguridad (es un identificador
-# fiscal público), pero revela qué clientes maneja este despacho, así que
-# se mantiene fuera del control de versiones (ver .gitignore).
+# La lista de RNCs vive en un archivo aparte, fuera del código fuente. El RNC
+# no es un secreto de seguridad (es un identificador fiscal público), pero
+# revela qué clientes maneja este despacho, así que se mantiene fuera del
+# control de versiones (ver .gitignore). Aceptamos ambos nombres para no romper
+# proyectos antiguos que usaban "config_rnc.json".
 ARCHIVO_RNCS = Path(__file__).parent / "config_rncs.json"
+ARCHIVO_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
 
 
 def cargar_rncs():
-    if not ARCHIVO_RNCS.exists():
-        print(f"❌ No se encontró {ARCHIVO_RNCS.name}. Crea ese archivo con la lista de RNCs, por ejemplo:")
+    archivo = ARCHIVO_RNC_LEGACY if ARCHIVO_RNC_LEGACY.exists() else ARCHIVO_RNCS
+
+    if not archivo.exists():
+        print(f"❌ No se encontró config_rnc.json ni config_rncs.json. Crea uno con la lista de RNCs, por ejemplo:")
         print('   ["00109491563", "501481808", ...]')
         sys.exit(1)
 
-    with open(ARCHIVO_RNCS, encoding="utf-8") as f:
+    with open(archivo, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -54,7 +58,7 @@ def main():
     for rnc in RNCS:
         existente = keyring.get_password(SERVICIO, rnc)
         estado = "(ya existe una clave guardada)" if existente else "(sin clave guardada)"
-        clave = getpass.getpass(f"Clave para RNC {rnc} {estado}: ")
+        clave = input(f"Clave para RNC {rnc} {estado}: ")
 
         if clave.strip() == "":
             print(f"  -> Saltado (sin cambios) para {rnc}\n")
