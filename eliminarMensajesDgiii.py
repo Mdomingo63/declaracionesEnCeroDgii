@@ -1,6 +1,8 @@
 import sys
 import time
+from typing import Optional
 from selenium import webdriver
+from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
@@ -25,8 +27,8 @@ class AutomationWorker(QThread):
         super().__init__()
         self.usuario = usuario
         self.clave = clave
-        self.driver = None
-        self.wait = None
+        self.driver: Optional[WebDriver] = None
+        self.driver_wait: Optional[WebDriverWait] = None
 
     def log(self, msg):
         self.log_signal.emit(msg)
@@ -53,7 +55,7 @@ class AutomationWorker(QThread):
         options.add_argument('--start-maximized')
 
         self.driver = webdriver.Chrome(options=options)
-        self.wait = WebDriverWait(self.driver, 20)
+        self.driver_wait = WebDriverWait(self.driver, 20)
 
         # 1) Abrir la página de login
         url = "https://www.dgii.gov.do/OFV/login.aspx"
@@ -62,7 +64,7 @@ class AutomationWorker(QThread):
 
         # 2) Escribir usuario
         self.log("Escribiendo usuario...")
-        campo_usuario = self.wait.until(
+        campo_usuario = self.driver_wait.until(
             EC.presence_of_element_located(
                 (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_txtUsuario"]')
             )
@@ -108,7 +110,7 @@ class AutomationWorker(QThread):
 
         # 6) Verificar cantidad de mensajes en el badge
         self.log("Verificando cantidad de mensajes...")
-        badge = self.wait.until(
+        badge = self.driver_wait.until(
             EC.presence_of_element_located(
                 (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]')
             )
@@ -123,7 +125,7 @@ class AutomationWorker(QThread):
 
         # 7) Click en el primer mensaje
         self.log("Haciendo click en el primer mensaje...")
-        primer_mensaje = self.wait.until(
+        primer_mensaje = self.driver_wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH,
                  '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_Enlace_47351055"]')
@@ -157,7 +159,7 @@ class AutomationWorker(QThread):
 
         # 9) Click en el botón 'Todo'
         self.log("Haciendo click en el botón 'Todo'...")
-        btn_todo = self.wait.until(
+        btn_todo = self.driver_wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnTodosMensajes"]')
             )
@@ -167,7 +169,7 @@ class AutomationWorker(QThread):
 
         # 10) Seleccionar todas las casillas de verificación
         self.log("Seleccionando todas las casillas de verificación...")
-        checkbox = self.wait.until(
+        checkbox = self.driver_wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH,
                  '//*[@id="ctl00_ContentPlaceHolder1_tablaTextoTipoMensaje"]'
@@ -218,6 +220,8 @@ class AutomationWorker(QThread):
 
     def _cerrar_sesion(self):
         """Hace click en el botón Salir del menú."""
+        if self.driver is None:
+            return
         try:
             btn_salir = self.driver.find_element(
                 By.XPATH, '//*[@id="menus"]/li[5]/a'
@@ -261,7 +265,7 @@ class MainWindow(QMainWindow):
 
         self.input_usuario = QLineEdit("101594918")
         self.input_clave = QLineEdit("hfagf")
-        self.input_clave.setEchoMode(QLineEdit.Password)
+        self.input_clave.setEchoMode(QLineEdit.EchoMode.Password)
 
         form.addRow("Usuario:", self.input_usuario)
         form.addRow("Clave:", self.input_clave)
