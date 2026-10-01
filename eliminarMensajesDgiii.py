@@ -13,6 +13,8 @@ from PIL import Image, ImageOps
 from selenium import webdriver
 from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
@@ -25,14 +27,13 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QThread, Signal, QTimer
 
-pytesseract.pytesseract.DEFAULT_ENCODING = locale.getpreferredencoding(False) or "utf-8"
-
-
 SERVICIO_KEYRING = "dgii_ofv"
 RUTA_CONFIG_RNCS = Path(__file__).parent / "config_rncs.json"
 RUTA_CONFIG_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
 XPATH_CONTRIBUYENTE = '//*[@id="cabecera"]/div[3]/table/tbody/tr/td[2]/font/b'
 XPATH_CONTENIDO_MENSAJE = '//*[@id="content_content_derecha"]/div[3]/div/div[2]/div/div/p[4]/img'
+XPATH_ELIMINAR_MENSAJE = '//*[@id="ctl00_ContentPlaceHolder1_btnEliminar"]'
+XPATH_BADGE_MENSAJES = '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'
 XPATH_TOKEN_TARJETA = '//*[@id="ctl00_ContentPlaceHolder1_txtpasscodeTarjetaToken"]'
 XPATH_CONTINUAR_TOKEN = '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptarTarjetaToken"]'
 TIEMPO_ESPERA_TOKEN = 180
@@ -186,6 +187,9 @@ class AutomationWorker(QThread):
                 self.log(f"{nombre}: mensaje {numero_mensaje} conservado.")
 
             revisados += 1
+            if self._decision == "eliminar" and self._cantidad_mensajes() == 0:
+                self.log(f"{nombre}: no quedan mensajes pendientes.")
+                break
             if revisados >= cantidad:
                 break
             try:
@@ -277,7 +281,14 @@ class AutomationWorker(QThread):
     def _leer_imagen_con_ocr(self, elemento):
         try:
             if self._idioma_ocr is None:
-                idiomas = set(pytesseract.get_languages(config=""))
+                codificacion_original = pytesseract.pytesseract.DEFAULT_ENCODING
+                try:
+                    pytesseract.pytesseract.DEFAULT_ENCODING = (
+                        locale.getpreferredencoding(False) or "utf-8"
+                    )
+                    idiomas = set(pytesseract.get_languages(config=""))
+                finally:
+                    pytesseract.pytesseract.DEFAULT_ENCODING = codificacion_original
                 if "spa" in idiomas:
                     self._idioma_ocr = "spa+eng" if "eng" in idiomas else "spa"
                 else:
@@ -315,34 +326,50 @@ class AutomationWorker(QThread):
             mensaje_actual = self.driver.find_element(By.XPATH, XPATH_CONTENIDO_MENSAJE)
         except NoSuchElementException:
             return False
-        controles = self.driver.find_elements(
-            By.XPATH, "//button | //input[@type='button' or @type='submit'] | //a"
-        )
-        candidatos = []
-        for control in controles:
-            if not control.is_displayed() or not control.is_enabled():
-                continue
-            etiqueta = " ".join((control.text or "", control.get_attribute("value") or "",
-                                  control.get_attribute("aria-label") or "",
-                                  control.get_attribute("title") or "")).strip().lower()
-            identificador = (control.get_attribute("id") or "").lower()
-            if "eliminar" in etiqueta and "todo" not in etiqueta and "todos" not in identificador:
-                candidatos.append(control)
-            elif "btneliminarmensaje" in identificador:
-                candidatos.append(control)
-        if len(candidatos) != 1:
+        cantidad_antes = self._cantidad_mensajes()
+        if cantidad_antes is None:
             return False
         try:
-            candidatos[0].click()
-            WebDriverWait(self.driver, 3).until(EC.alert_is_present()).accept()
+            boton_eliminar = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, XPATH_ELIMINAR_MENSAJE))
+            )
+            boton_eliminar.click()
         except TimeoutException:
-            try:
-                WebDriverWait(self.driver, 5).until(EC.staleness_of(mensaje_actual))
-            except TimeoutException:
-                return False
+            return False
         except WebDriverException:
             return False
+
+        try:
+            alerta = WebDriverWait(self.driver, 3).until(EC.alert_is_present())
+            alerta.accept()
+        except TimeoutException:
+            try:
+                ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+            except WebDriverException:
+                return False
+
+        def eliminacion_confirmada(driver):
+            if EC.staleness_of(mensaje_actual)(driver):
+                return True
+            cantidad_actual = self._cantidad_mensajes()
+            return cantidad_actual is not None and cantidad_actual < cantidad_antes
+
+        try:
+            WebDriverWait(self.driver, 10).until(eliminacion_confirmada)
+        except TimeoutException:
+            return False
         return True
+
+    def _cantidad_mensajes(self):
+        if self.driver is None:
+            return None
+        try:
+            badge = WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, XPATH_BADGE_MENSAJES))
+            )
+        except TimeoutException:
+            return None
+        return self._obtener_cantidad(badge)
 
     # ------------------------------------------------------------------
     # Métodos auxiliares
