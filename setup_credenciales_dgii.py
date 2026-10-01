@@ -48,17 +48,15 @@ def cargar_rncs():
         return json.load(f)
 
 
-RNCS = cargar_rncs()
-
-
 def main():
-    print(f"Se registrarán/actualizarán {len(RNCS)} credenciales en el keyring del sistema.")
+    rncs = cargar_rncs()
+    print(f"Se registrarán/actualizarán {len(rncs)} credenciales en el keyring del sistema.")
     print("Presiona ENTER sin escribir nada para saltar un RNC y dejar su clave actual sin cambios.\n")
 
-    for rnc in RNCS:
+    for rnc in rncs:
         existente = keyring.get_password(SERVICIO, rnc)
         estado = "(ya existe una clave guardada)" if existente else "(sin clave guardada)"
-        clave = input(f"Clave para RNC {rnc} {estado}: ")
+        clave = getpass.getpass(f"Clave para RNC {rnc} {estado}: ")
 
         if clave.strip() == "":
             print(f"  -> Saltado (sin cambios) para {rnc}\n")

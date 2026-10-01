@@ -1,52 +1,95 @@
+import json
+import locale
+import re
 import sys
 import time
+import threading
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
+import keyring
+import pytesseract
+from PIL import Image, ImageOps
 from selenium import webdriver
 from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, WebDriverException
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QLabel, QLineEdit, QGroupBox, QFormLayout
+    QPushButton, QTextEdit, QLabel, QSpinBox
 )
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, QTimer
+
+pytesseract.pytesseract.DEFAULT_ENCODING = locale.getpreferredencoding(False) or "utf-8"
+
+
+SERVICIO_KEYRING = "dgii_ofv"
+RUTA_CONFIG_RNCS = Path(__file__).parent / "config_rncs.json"
+RUTA_CONFIG_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
+XPATH_CONTRIBUYENTE = '//*[@id="cabecera"]/div[3]/table/tbody/tr/td[2]/font/b'
+XPATH_CONTENIDO_MENSAJE = '//*[@id="content_content_derecha"]/div[3]/div/div[2]/div/div/p[4]/img'
 
 
 class AutomationWorker(QThread):
     """Hilo que ejecuta toda la automatización con Selenium."""
 
     log_signal = Signal(str)
-    finished_signal = Signal(bool, str)
+    finished_signal = Signal(str)
+    review_signal = Signal(str, str, int, int, str)
 
-    def __init__(self, usuario, clave):
+    def __init__(self, cuentas, segundos_revision):
         super().__init__()
-        self.usuario = usuario
-        self.clave = clave
+        self.cuentas = cuentas
+        self.segundos_revision = segundos_revision
         self.driver: Optional[WebDriver] = None
         self.driver_wait: Optional[WebDriverWait] = None
+        self._decision_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._decision = None
+        self._idioma_ocr = None
+        self._aviso_modelo_espanol = False
 
     def log(self, msg):
         self.log_signal.emit(msg)
 
+    def decidir(self, decision):
+        self._decision = decision
+        self._decision_event.set()
+
+    def detener(self):
+        self._stop_event.set()
+        self._decision_event.set()
+
     def run(self):
+        resultados = []
         try:
-            self._ejecutar_automatizacion()
-            self.finished_signal.emit(True, "Proceso completado exitosamente.")
+            for rnc, clave in self.cuentas:
+                if self._stop_event.is_set():
+                    break
+                try:
+                    nombre, revisados, eliminados = self._procesar_cuenta(rnc, clave)
+                    resultados.append(
+                        f"{rnc} ({nombre}): {revisados} revisados, {eliminados} eliminados"
+                    )
+                except Exception as e:
+                    resultados.append(f"{rnc}: error ({e})")
+                    self.log(f"{rnc}: no se pudo completar la cuenta ({e})")
+                finally:
+                    self._cerrar_navegador()
+            estado = "Detenido por el usuario. " if self._stop_event.is_set() else "Proceso terminado. "
+            self.finished_signal.emit(estado + " | ".join(resultados))
         except Exception as e:
-            self.log(f"[ERROR] {e}")
-            self.finished_signal.emit(False, str(e))
-        finally:
-            self._cerrar_navegador()
+            self.finished_signal.emit(f"Error del proceso: {e}")
 
     # ------------------------------------------------------------------
     # Flujo principal
     # ------------------------------------------------------------------
-    def _ejecutar_automatizacion(self):
+    def _procesar_cuenta(self, usuario, clave):
         # --- Configurar y abrir navegador ---
         options = Options()
         # options.add_argument('--headless')  # Descomentar para modo sin ventana
@@ -57,96 +100,94 @@ class AutomationWorker(QThread):
         self.driver = webdriver.Chrome(options=options)
         self.driver_wait = WebDriverWait(self.driver, 20)
 
-        # 1) Abrir la página de login
         url = "https://www.dgii.gov.do/OFV/login.aspx"
-        self.log(f"Abriendo página: {url}")
         self.driver.get(url)
 
-        # 2) Escribir usuario
-        self.log("Escribiendo usuario...")
         campo_usuario = self.driver_wait.until(
             EC.presence_of_element_located(
                 (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_txtUsuario"]')
             )
         )
         campo_usuario.clear()
-        campo_usuario.send_keys(self.usuario)
+        campo_usuario.send_keys(usuario)
 
-        # 3) Escribir clave
-        self.log("Escribiendo clave...")
         campo_clave = self.driver.find_element(
             By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_txtPassword"]'
         )
         campo_clave.clear()
-        campo_clave.send_keys(self.clave)
+        campo_clave.send_keys(clave)
 
-        # 4) Click en Aceptar
-        self.log("Haciendo click en Aceptar...")
         btn_aceptar = self.driver.find_element(
             By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptar"]'
         )
         btn_aceptar.click()
-        time.sleep(3)
+        try:
+            nombre = WebDriverWait(self.driver, 15).until(
+                EC.visibility_of_element_located((By.XPATH, XPATH_CONTRIBUYENTE))
+            ).text.strip()
+        except TimeoutException as e:
+            raise RuntimeError("no se pudo confirmar el acceso ni leer el contribuyente") from e
+        self.log(f"Cuenta {usuario}: {nombre}")
 
-        # 5) Verificar si aparece el mensaje de alerta
-        self.log("Verificando mensaje de alerta...")
-        alerta_encontrada = False
         try:
             alerta = WebDriverWait(self.driver, 8).until(
                 EC.presence_of_element_located(
                     (By.XPATH, '//*[@id="alert"]/a/div[2]')
                 )
             )
-            self.log("Mensaje de alerta encontrado. Haciendo click...")
             alerta.click()
-            alerta_encontrada = True
             time.sleep(3)
         except TimeoutException:
-            self.log("No apareció mensaje de alerta. Saliendo del flujo...")
-            return  # cerrar navegador en finally
+            self.log(f"{nombre}: no hay avisos pendientes.")
+            return nombre, 0, 0
 
-        if not alerta_encontrada:
-            return
-
-        # 6) Verificar cantidad de mensajes en el badge
-        self.log("Verificando cantidad de mensajes...")
         badge = self.driver_wait.until(
             EC.presence_of_element_located(
                 (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]')
             )
         )
         cantidad = self._obtener_cantidad(badge)
-        self.log(f"Cantidad de mensajes: {cantidad}")
-
         if cantidad == 0:
-            self.log("No hay mensajes. Cerrando sesión...")
             self._cerrar_sesion()
-            return
+            return nombre, 0, 0
 
-        # 7) Click en el primer mensaje
-        self.log("Haciendo click en el primer mensaje...")
         primer_mensaje = self.driver_wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH,
-                 '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_Enlace_47351055"]')
+                 '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes"]//tr[td]//a')
             )
         )
         primer_mensaje.click()
         time.sleep(3)
 
-        # 8) Click en Siguiente hasta que la cantidad llegue a 0
-        self.log("Navegando mensajes con el botón Siguiente...")
-        while True:
-            badge = self.driver.find_element(
-                By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'
-            )
-            cantidad = self._obtener_cantidad(badge)
-            self.log(f"  → Cantidad actual: {cantidad}")
+        revisados = 0
+        eliminados = 0
+        while not self._stop_event.is_set() and revisados < cantidad:
+            numero_mensaje = revisados + 1
+            resumen = self._resumen_mensaje()
+            self._decision = None
+            self._decision_event.clear()
+            self.review_signal.emit(usuario, nombre, numero_mensaje, cantidad, resumen)
+            self._decision_event.wait()
 
-            if cantidad == 0:
-                self.log("La cantidad de mensajes llegó a cero.")
+            if self._stop_event.is_set():
                 break
+            if self._decision == "eliminar":
+                if self._eliminar_mensaje_actual():
+                    eliminados += 1
+                    self.log(f"{nombre}: mensaje {numero_mensaje} eliminado.")
+                else:
+                    self.log(
+                        f"{nombre}: no se confirmó el borrado del mensaje {numero_mensaje}; "
+                        "permanece abierto para otra decisión."
+                    )
+                    continue
+            else:
+                self.log(f"{nombre}: mensaje {numero_mensaje} conservado.")
 
+            revisados += 1
+            if revisados >= cantidad:
+                break
             try:
                 btn_siguiente = self.driver.find_element(
                     By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]/span'
@@ -154,56 +195,115 @@ class AutomationWorker(QThread):
                 btn_siguiente.click()
                 time.sleep(2)
             except NoSuchElementException:
-                self.log("No se encontró el botón Siguiente. Saliendo del bucle...")
                 break
 
-        # 9) Click en el botón 'Todo'
-        self.log("Haciendo click en el botón 'Todo'...")
-        btn_todo = self.driver_wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnTodosMensajes"]')
-            )
-        )
-        btn_todo.click()
-        time.sleep(3)
-
-        # 10) Seleccionar todas las casillas de verificación
-        self.log("Seleccionando todas las casillas de verificación...")
-        checkbox = self.driver_wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH,
-                 '//*[@id="ctl00_ContentPlaceHolder1_tablaTextoTipoMensaje"]'
-                 '/tbody/tr/td[1]/input')
-            )
-        )
-        if not checkbox.is_selected():
-            checkbox.click()
-        time.sleep(1)
-
-        # 11) Click en Eliminar
-        self.log("Haciendo click en el botón Eliminar...")
-        btn_eliminar = self.driver.find_element(
-            By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnEliminarTodos"]'
-        )
-        btn_eliminar.click()
-        time.sleep(2)
-
-        # 12) Presionar Enter para confirmar la eliminación
-        self.log("Presionando Enter para confirmar eliminación...")
-        # Intentar primero con un alert de JavaScript
-        try:
-            alert = WebDriverWait(self.driver, 3).until(EC.alert_is_present())
-            alert.accept()
-            self.log("Alerta de JavaScript aceptada.")
-        except TimeoutException:
-            # Si no es un alert JS, usar ActionChains para enviar Enter
-            ActionChains(self.driver).send_keys(Keys.ENTER).perform()
-            self.log("Enter enviado vía teclado.")
-        time.sleep(3)
-
-        # 13) Cerrar sesión
-        self.log("Cerrando sesión...")
         self._cerrar_sesion()
+        return nombre, revisados, eliminados
+
+    def _resumen_mensaje(self):
+        driver_wait = self.driver_wait
+        if self.driver is None or driver_wait is None:
+            return "No se pudo leer el contenido del mensaje."
+        try:
+            imagen = driver_wait.until(
+                EC.presence_of_element_located((By.XPATH, XPATH_CONTENIDO_MENSAJE))
+            )
+        except TimeoutException:
+            return "No se encontró el contenido del mensaje en la página."
+
+        texto_ocr = self._leer_imagen_con_ocr(imagen)
+        if texto_ocr:
+            return self._resumir_texto(texto_ocr)
+
+        partes = [
+            imagen.get_attribute("alt"),
+            imagen.get_attribute("title"),
+            imagen.get_attribute("aria-label"),
+        ]
+        for nivel in range(1, 6):
+            xpath_padre = "/".join([".."] * nivel)
+            try:
+                texto = imagen.find_element(By.XPATH, xpath_padre).text.strip()
+            except NoSuchElementException:
+                continue
+            if texto:
+                partes.append(texto)
+                break
+
+        texto_mensaje = " ".join(parte.strip() for parte in partes if parte and parte.strip())
+        if not texto_mensaje:
+            return "El aviso aparece como imagen y no tiene texto accesible para resumir."
+        return self._resumir_texto(texto_mensaje)
+
+    def _leer_imagen_con_ocr(self, elemento):
+        try:
+            if self._idioma_ocr is None:
+                idiomas = set(pytesseract.get_languages(config=""))
+                if "spa" in idiomas:
+                    self._idioma_ocr = "spa+eng" if "eng" in idiomas else "spa"
+                else:
+                    self._idioma_ocr = "eng" if "eng" in idiomas else next(
+                        (idioma for idioma in sorted(idiomas) if idioma != "osd"), "eng"
+                    )
+                if "spa" not in idiomas and not self._aviso_modelo_espanol:
+                    self.log("[AVISO] Tesseract no tiene modelo spa; OCR con eng puede ser menos preciso en español.")
+                    self._aviso_modelo_espanol = True
+
+            imagen = Image.open(BytesIO(elemento.screenshot_as_png)).convert("L")
+            imagen = ImageOps.autocontrast(imagen)
+            if imagen.width < 1200:
+                imagen = imagen.resize((imagen.width * 2, imagen.height * 2))
+            return pytesseract.image_to_string(
+                imagen, lang=self._idioma_ocr, config="--psm 6"
+            ).strip()
+        except (OSError, UnicodeDecodeError, WebDriverException,
+            pytesseract.TesseractError, pytesseract.TesseractNotFoundError) as e:
+            self.log(f"[AVISO] OCR no disponible para este aviso; se usará texto accesible ({e}).")
+            return ""
+
+    def _resumir_texto(self, texto):
+        texto = " ".join(texto.split())
+        if not texto:
+            return "Mensaje sin texto legible."
+        oraciones = re.split(r"(?<=[.!?])\s+", texto)
+        resumen = " ".join(oraciones[:3])
+        return resumen[:600] + ("…" if len(resumen) > 600 else "")
+
+    def _eliminar_mensaje_actual(self):
+        if self.driver is None:
+            return False
+        try:
+            mensaje_actual = self.driver.find_element(By.XPATH, XPATH_CONTENIDO_MENSAJE)
+        except NoSuchElementException:
+            return False
+        controles = self.driver.find_elements(
+            By.XPATH, "//button | //input[@type='button' or @type='submit'] | //a"
+        )
+        candidatos = []
+        for control in controles:
+            if not control.is_displayed() or not control.is_enabled():
+                continue
+            etiqueta = " ".join((control.text or "", control.get_attribute("value") or "",
+                                  control.get_attribute("aria-label") or "",
+                                  control.get_attribute("title") or "")).strip().lower()
+            identificador = (control.get_attribute("id") or "").lower()
+            if "eliminar" in etiqueta and "todo" not in etiqueta and "todos" not in identificador:
+                candidatos.append(control)
+            elif "btneliminarmensaje" in identificador:
+                candidatos.append(control)
+        if len(candidatos) != 1:
+            return False
+        try:
+            candidatos[0].click()
+            WebDriverWait(self.driver, 3).until(EC.alert_is_present()).accept()
+        except TimeoutException:
+            try:
+                WebDriverWait(self.driver, 5).until(EC.staleness_of(mensaje_actual))
+            except TimeoutException:
+                return False
+        except WebDriverException:
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Métodos auxiliares
@@ -252,6 +352,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DGII - Automatización de Mensajes")
         self.setMinimumSize(650, 550)
         self.worker = None
+        self.revision_pendiente = False
+        self.segundos_restantes = 0
+        self.timer_revision = QTimer(self)
+        self.timer_revision.timeout.connect(self._actualizar_cuenta_regresiva)
         self._construir_ui()
 
     def _construir_ui(self):
@@ -259,20 +363,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # --- Grupo de credenciales ---
-        grupo_cred = QGroupBox("Credenciales DGII")
-        form = QFormLayout()
+        opciones = QHBoxLayout()
+        opciones.addWidget(QLabel("Pausa para leer cada mensaje (segundos):"))
+        self.input_segundos = QSpinBox()
+        self.input_segundos.setRange(0, 300)
+        self.input_segundos.setValue(15)
+        opciones.addWidget(self.input_segundos)
+        opciones.addStretch()
+        layout.addLayout(opciones)
 
-        self.input_usuario = QLineEdit("101594918")
-        self.input_clave = QLineEdit("hfagf")
-        self.input_clave.setEchoMode(QLineEdit.EchoMode.Password)
-
-        form.addRow("Usuario:", self.input_usuario)
-        form.addRow("Clave:", self.input_clave)
-        grupo_cred.setLayout(form)
-        layout.addWidget(grupo_cred)
-
-        # --- Botones ---
+        # --- Controles del proceso y revisión ---
         botones = QHBoxLayout()
         self.btn_iniciar = QPushButton("▶  Iniciar Proceso")
         self.btn_iniciar.clicked.connect(self._iniciar_proceso)
@@ -281,8 +381,18 @@ class MainWindow(QMainWindow):
         self.btn_detener.clicked.connect(self._detener_proceso)
         self.btn_detener.setEnabled(False)
 
+        self.btn_eliminar = QPushButton("Eliminar mensaje leído")
+        self.btn_eliminar.clicked.connect(lambda: self._decidir_mensaje("eliminar"))
+        self.btn_eliminar.setEnabled(False)
+
+        self.btn_conservar = QPushButton("Conservar y siguiente")
+        self.btn_conservar.clicked.connect(lambda: self._decidir_mensaje("conservar"))
+        self.btn_conservar.setEnabled(False)
+
         botones.addWidget(self.btn_iniciar)
         botones.addWidget(self.btn_detener)
+        botones.addWidget(self.btn_eliminar)
+        botones.addWidget(self.btn_conservar)
         layout.addLayout(botones)
 
         # --- Área de logs ---
@@ -293,35 +403,94 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _iniciar_proceso(self):
-        usuario = self.input_usuario.text().strip()
-        clave = self.input_clave.text().strip()
+        archivo = RUTA_CONFIG_RNC_LEGACY if RUTA_CONFIG_RNC_LEGACY.exists() else RUTA_CONFIG_RNCS
+        if not archivo.exists():
+            self._agregar_log("[ERROR] No se encontró config_rnc.json ni config_rncs.json.")
+            return
 
-        if not usuario or not clave:
-            self._agregar_log("[ERROR] Debe ingresar usuario y clave.")
+        try:
+            with archivo.open(encoding="utf-8") as f:
+                rncs = json.load(f)
+            if not isinstance(rncs, list) or not all(isinstance(rnc, str) for rnc in rncs):
+                raise ValueError("la configuración debe ser una lista JSON de RNC como texto")
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            self._agregar_log(f"[ERROR] Configuración de RNC inválida: {e}")
+            return
+
+        cuentas = []
+        sin_clave = 0
+        for rnc in dict.fromkeys(rnc.strip() for rnc in rncs if rnc.strip()):
+            try:
+                clave = keyring.get_password(SERVICIO_KEYRING, rnc)
+            except Exception as e:
+                self._agregar_log(f"[ERROR] No se pudo consultar el keyring: {e}")
+                return
+            if clave:
+                cuentas.append((rnc, clave))
+            else:
+                sin_clave += 1
+        if not cuentas:
+            self._agregar_log("[ERROR] No hay credenciales guardadas para los RNC configurados.")
             return
 
         self.log_area.clear()
-        self._agregar_log("=== Iniciando proceso de automatización ===")
+        self._agregar_log(f"Iniciando {len(cuentas)} cuentas; {sin_clave} sin clave guardada se omitirán.")
         self.btn_iniciar.setEnabled(False)
         self.btn_detener.setEnabled(True)
-
-        self.worker = AutomationWorker(usuario, clave)
+        self.input_segundos.setEnabled(False)
+        self.worker = AutomationWorker(cuentas, self.input_segundos.value())
         self.worker.log_signal.connect(self._agregar_log)
+        self.worker.review_signal.connect(self._mostrar_revision)
         self.worker.finished_signal.connect(self._proceso_finalizado)
         self.worker.start()
 
     def _detener_proceso(self):
         if self.worker and self.worker.isRunning():
-            self._agregar_log("Deteniendo proceso...")
-            self.worker.terminate()
-            self.worker.wait()
-            self._proceso_finalizado(False, "Proceso detenido por el usuario.")
+            self.worker.detener()
+            self._agregar_log("Se detendrá al terminar el mensaje actual.")
+            self.btn_detener.setEnabled(False)
 
-    def _proceso_finalizado(self, exito, mensaje):
-        simbolo = "✓" if exito else "✗"
-        self._agregar_log(f"\n{simbolo} {mensaje}")
+    def _mostrar_revision(self, rnc, nombre, numero, total, resumen):
+        self.revision_pendiente = True
+        self.segundos_restantes = self.input_segundos.value()
+        self._agregar_log(f"\n{nombre} ({rnc}) | Mensaje {numero} de {total}")
+        self._agregar_log(f"Resumen: {resumen}")
+        self._agregar_log("Esperando tu decisión; no se eliminará ni avanzará automáticamente.")
+        self.btn_eliminar.setEnabled(False)
+        self.btn_conservar.setEnabled(False)
+        if self.segundos_restantes == 0:
+            self._habilitar_decision()
+        else:
+            self._agregar_log(f"Decisión disponible en {self.segundos_restantes} segundos.")
+            self.timer_revision.start(1000)
+
+    def _actualizar_cuenta_regresiva(self):
+        self.segundos_restantes -= 1
+        if self.segundos_restantes <= 0:
+            self.timer_revision.stop()
+            self._habilitar_decision()
+
+    def _habilitar_decision(self):
+        self.btn_eliminar.setEnabled(True)
+        self.btn_conservar.setEnabled(True)
+
+    def _decidir_mensaje(self, decision):
+        if self.revision_pendiente and self.worker:
+            self.revision_pendiente = False
+            self.timer_revision.stop()
+            self.btn_eliminar.setEnabled(False)
+            self.btn_conservar.setEnabled(False)
+            self.worker.decidir(decision)
+
+    def _proceso_finalizado(self, mensaje):
+        self.timer_revision.stop()
+        self.revision_pendiente = False
+        self._agregar_log(f"\n{mensaje}")
         self.btn_iniciar.setEnabled(True)
         self.btn_detener.setEnabled(False)
+        self.btn_eliminar.setEnabled(False)
+        self.btn_conservar.setEnabled(False)
+        self.input_segundos.setEnabled(True)
         self.worker = None
 
     def _agregar_log(self, texto):

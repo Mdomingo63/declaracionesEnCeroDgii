@@ -1,3 +1,13 @@
+"""Importa credenciales DGII desde credenciales.csv al keyring del sistema.
+
+El CSV debe tener las columnas ``rnc,clave``. Este script guarda cada clave
+con el servicio ``dgii_ofv`` y el RNC como usuario, para que el automatizador
+pueda recuperarla sin incluirla en su código. El CSV contiene claves en texto
+plano: protégelo y elimínalo cuando termine la importación.
+
+Uso: ``python guardar_claves_dgii.py``
+"""
+
 import csv
 import sys
 import keyring
