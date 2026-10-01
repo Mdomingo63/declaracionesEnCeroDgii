@@ -27,24 +27,18 @@ from pathlib import Path
 # No es secreto, solo es un namespace dentro del keyring.
 SERVICIO = "dgii_ofv"
 
-# La lista de RNCs vive en un archivo aparte, fuera del código fuente. El RNC
-# no es un secreto de seguridad (es un identificador fiscal público), pero
-# revela qué clientes maneja este despacho, así que se mantiene fuera del
-# control de versiones (ver .gitignore). Aceptamos ambos nombres para no romper
-# proyectos antiguos que usaban "config_rnc.json".
-ARCHIVO_RNCS = Path(__file__).parent / "config_rncs.json"
-ARCHIVO_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
+# La lista de RNCs se mantiene fuera del control de versiones porque revela
+# información comercial de los clientes.
+ARCHIVO_RNC = Path(__file__).parent / "config_rnc.json"
 
 
 def cargar_rncs():
-    archivo = ARCHIVO_RNC_LEGACY if ARCHIVO_RNC_LEGACY.exists() else ARCHIVO_RNCS
-
-    if not archivo.exists():
-        print(f"❌ No se encontró config_rnc.json ni config_rncs.json. Crea uno con la lista de RNCs, por ejemplo:")
+    if not ARCHIVO_RNC.exists():
+        print("❌ No se encontró config_rnc.json. Crea el archivo con una lista de RNCs, por ejemplo:")
         print('   ["00109491563", "501481808", ...]')
         sys.exit(1)
 
-    with open(archivo, encoding="utf-8") as f:
+    with ARCHIVO_RNC.open(encoding="utf-8") as f:
         return json.load(f)
 
 

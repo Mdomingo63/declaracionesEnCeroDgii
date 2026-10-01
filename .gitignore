@@ -1,7 +1,7 @@
 # Lista de RNCs de clientes: no es un secreto de seguridad, pero revela
 # información comercial confidencial (quiénes son los clientes), así que
 # no se sube al repositorio.
-config_rncs.json
+config_rnc.json
 
 
 # Entornos virtuales de Python
