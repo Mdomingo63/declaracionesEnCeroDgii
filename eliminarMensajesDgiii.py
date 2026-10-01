@@ -33,6 +33,9 @@ RUTA_CONFIG_RNCS = Path(__file__).parent / "config_rncs.json"
 RUTA_CONFIG_RNC_LEGACY = Path(__file__).parent / "config_rnc.json"
 XPATH_CONTRIBUYENTE = '//*[@id="cabecera"]/div[3]/table/tbody/tr/td[2]/font/b'
 XPATH_CONTENIDO_MENSAJE = '//*[@id="content_content_derecha"]/div[3]/div/div[2]/div/div/p[4]/img'
+XPATH_TOKEN_TARJETA = '//*[@id="ctl00_ContentPlaceHolder1_txtpasscodeTarjetaToken"]'
+XPATH_CONTINUAR_TOKEN = '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptarTarjetaToken"]'
+TIEMPO_ESPERA_TOKEN = 180
 
 
 class AutomationWorker(QThread):
@@ -121,12 +124,9 @@ class AutomationWorker(QThread):
             By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptar"]'
         )
         btn_aceptar.click()
-        try:
-            nombre = WebDriverWait(self.driver, 15).until(
-                EC.visibility_of_element_located((By.XPATH, XPATH_CONTRIBUYENTE))
-            ).text.strip()
-        except TimeoutException as e:
-            raise RuntimeError("no se pudo confirmar el acceso ni leer el contribuyente") from e
+        nombre = self._completar_inicio_sesion()
+        if nombre is None:
+            return usuario, 0, 0
         self.log(f"Cuenta {usuario}: {nombre}")
 
         try:
@@ -199,6 +199,45 @@ class AutomationWorker(QThread):
 
         self._cerrar_sesion()
         return nombre, revisados, eliminados
+
+    def _completar_inicio_sesion(self):
+        if self.driver is None:
+            raise RuntimeError("el navegador no está disponible")
+        try:
+            resultado = WebDriverWait(self.driver, 20).until(
+                EC.any_of(
+                    EC.visibility_of_element_located((By.XPATH, XPATH_TOKEN_TARJETA)),
+                    EC.visibility_of_element_located((By.XPATH, XPATH_CONTRIBUYENTE)),
+                )
+            )
+        except TimeoutException as e:
+            raise RuntimeError(
+                "no apareció el campo de tarjeta/token ni se confirmó el inicio de sesión"
+            ) from e
+
+        if resultado.get_attribute("id") != "ctl00_ContentPlaceHolder1_txtpasscodeTarjetaToken":
+            return resultado.text.strip()
+
+        self.log(
+            "La DGII solicita tarjeta o token digital. Escríbelo en el navegador y pulsa "
+            f"Continuar en esa página; tienes hasta {TIEMPO_ESPERA_TOKEN // 60} minutos."
+        )
+        try:
+            resultado.click()
+        except WebDriverException:
+            self.log("[AVISO] Haz clic manualmente en el campo de tarjeta/token para escribirlo.")
+
+        limite = time.monotonic() + TIEMPO_ESPERA_TOKEN
+        while time.monotonic() < limite and not self._stop_event.is_set():
+            contribuyentes = self.driver.find_elements(By.XPATH, XPATH_CONTRIBUYENTE)
+            for contribuyente in contribuyentes:
+                if contribuyente.is_displayed():
+                    return contribuyente.text.strip()
+            self._stop_event.wait(0.5)
+        else:
+            if self._stop_event.is_set():
+                return None
+            raise TimeoutError("no se confirmó el inicio de sesión con tarjeta o token")
 
     def _resumen_mensaje(self):
         driver_wait = self.driver_wait
