@@ -36,7 +36,10 @@ XPATH_ELIMINAR_MENSAJE = '//*[@id="ctl00_ContentPlaceHolder1_btnEliminar"]'
 XPATH_BADGE_MENSAJES = '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'
 XPATH_TOKEN_TARJETA = '//*[@id="ctl00_ContentPlaceHolder1_txtpasscodeTarjetaToken"]'
 XPATH_CONTINUAR_TOKEN = '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptarTarjetaToken"]'
+XPATH_PRIMER_MENSAJE = '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes_ctl02_48014729"]'
+XPATH_PRIMER_MENSAJE_TABLA = '//*[@id="ctl00_ContentPlaceHolder1_GVMensajes"]//tr[td]//a'
 TIEMPO_ESPERA_TOKEN = 180
+TIEMPO_ESTABLE_TOKEN = 2
 
 
 class AutomationWorker(QThread):
@@ -193,10 +196,18 @@ class AutomationWorker(QThread):
             if revisados >= cantidad:
                 break
             try:
-                btn_siguiente = self.driver.find_element(
-                    By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]/span'
-                )
-                btn_siguiente.click()
+                if self._decision == "eliminar":
+                    WebDriverWait(self.driver, 10).until(
+                        EC.any_of(
+                            EC.element_to_be_clickable((By.XPATH, XPATH_PRIMER_MENSAJE)),
+                            EC.element_to_be_clickable((By.XPATH, XPATH_PRIMER_MENSAJE_TABLA)),
+                        )
+                    ).click()
+                else:
+                    btn_siguiente = self.driver.find_element(
+                        By.XPATH, '//*[@id="ctl00_ContentPlaceHolder1_btnSig"]/span'
+                    )
+                    btn_siguiente.click()
                 time.sleep(2)
             except NoSuchElementException:
                 break
@@ -223,8 +234,8 @@ class AutomationWorker(QThread):
             return resultado.text.strip()
 
         self.log(
-            "La DGII solicita tarjeta o token digital. Escríbelo en el navegador y pulsa "
-            f"Continuar en esa página; tienes hasta {TIEMPO_ESPERA_TOKEN // 60} minutos."
+            "La DGII solicita tarjeta o token digital. Escríbelo en el navegador; "
+            f"Continuar se pulsará automáticamente. Tienes hasta {TIEMPO_ESPERA_TOKEN // 60} minutos."
         )
         try:
             resultado.click()
@@ -232,7 +243,26 @@ class AutomationWorker(QThread):
             self.log("[AVISO] Haz clic manualmente en el campo de tarjeta/token para escribirlo.")
 
         limite = time.monotonic() + TIEMPO_ESPERA_TOKEN
+        token_anterior = ""
+        token_estable_desde = None
+        token_enviado = False
         while time.monotonic() < limite and not self._stop_event.is_set():
+            campos_token = self.driver.find_elements(By.XPATH, XPATH_TOKEN_TARJETA)
+            if campos_token and not token_enviado:
+                token_actual = campos_token[0].get_attribute("value") or ""
+                ahora = time.monotonic()
+                if token_actual and token_actual == token_anterior:
+                    if token_estable_desde is not None and ahora - token_estable_desde >= TIEMPO_ESTABLE_TOKEN:
+                        boton_continuar = WebDriverWait(self.driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, XPATH_CONTINUAR_TOKEN))
+                        )
+                        boton_continuar.click()
+                        token_enviado = True
+                        self.log("Token ingresado; se pulsó Continuar automáticamente.")
+                else:
+                    token_anterior = token_actual
+                    token_estable_desde = ahora if token_actual else None
+
             contribuyentes = self.driver.find_elements(By.XPATH, XPATH_CONTRIBUYENTE)
             for contribuyente in contribuyentes:
                 if contribuyente.is_displayed():
