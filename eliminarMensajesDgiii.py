@@ -35,6 +35,7 @@ XPATH_CONTINUAR_TOKEN = '//*[@id="ctl00_ContentPlaceHolder1_BtnAceptarTarjetaTok
 XPATH_CONTRIBUYENTE = '//*[@id="cabecera"]/div[3]/table/tbody/tr/td[2]/font/b'
 XPATH_POPUP = '//*[@id="lblMensaje"]'
 XPATH_CERRAR_POPUP = '//*[@id="cboxClose"]'
+XPATH_ALERTA = '//*[@id="alert"]/a/div[2]'
 XPATH_BADGE_NOTIFICACIONES = '//*[@id="ctl00_ContentPlaceHolder1_badgeNotificacion"]'
 XPATH_BADGE_MENSAJES = '//*[@id="ctl00_ContentPlaceHolder1_badgeMensajes"]'
 XPATH_BOTON_MENSAJES = '//*[@id="ctl00_ContentPlaceHolder1_btnMensaje"]'
@@ -114,13 +115,17 @@ class AutomationWorker(QThread):
         self.log(f"Cuenta {usuario}: {nombre}")
 
         notificaciones = 0
-        # El emergente indica que primero se muestran las Notificaciones.
-        if self._visible(XPATH_POPUP, 8):
-            self._click(XPATH_CERRAR_POPUP)
+        # El emergente sale al iniciar sesión cuando hay Notificaciones obligatorias.
+        if self._hay_popup_notificaciones():
+            self.log(f"{nombre}: aviso emergente detectado; se cierra para ver las notificaciones.")
+            self._cerrar_popup()
             self._stop_event.wait(2)
             notificaciones = self._procesar_notificaciones(nombre)
         else:
-            self.log(f"{nombre}: no hay aviso emergente de notificaciones.")
+            self.log(f"{nombre}: no apareció el aviso emergente; se continúa con los mensajes.")
+            if self._visible(XPATH_ALERTA, 5):
+                self._click(XPATH_ALERTA)
+                self._stop_event.wait(3)
 
         revisados, eliminados = self._procesar_mensajes(usuario, nombre)
         if notificaciones == 0 and revisados == 0 and not self._stop_event.is_set():
@@ -276,7 +281,9 @@ class AutomationWorker(QThread):
             return False
 
         try:
-            WebDriverWait(driver, 3).until(EC.alert_is_present()).accept()
+            alerta = WebDriverWait(driver, 3).until(EC.alert_is_present())
+            self.log(f"Confirmación de la página: \"{alerta.text}\"; se acepta.")
+            alerta.accept()
         except TimeoutException:
             try:
                 ActionChains(driver).send_keys(Keys.ENTER).perform()
@@ -309,6 +316,31 @@ class AutomationWorker(QThread):
             except (TimeoutException, WebDriverException):
                 continue
         return False
+
+    def _hay_popup_notificaciones(self, espera=10):
+        """True si aparece el emergente (lblMensaje) o su botón de cerrar."""
+        driver = self._driver()
+
+        def popup_presente(d):
+            for xpath in (XPATH_POPUP, XPATH_CERRAR_POPUP):
+                if any(e.is_displayed() for e in d.find_elements(By.XPATH, xpath)):
+                    return True
+            return False
+
+        try:
+            return bool(WebDriverWait(driver, espera).until(popup_presente))
+        except TimeoutException:
+            return False
+
+    def _cerrar_popup(self):
+        driver = self._driver()
+        boton = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.XPATH, XPATH_CERRAR_POPUP))
+        )
+        try:
+            boton.click()
+        except WebDriverException:
+            driver.execute_script("arguments[0].click();", boton)
 
     def _visible(self, xpath, espera):
         try:
@@ -385,7 +417,7 @@ class MainWindow(QMainWindow):
         opciones.addWidget(QLabel("Pausa para leer cada mensaje (segundos):"))
         self.input_segundos = QSpinBox()
         self.input_segundos.setRange(0, 300)
-        self.input_segundos.setValue(15)
+        self.input_segundos.setValue(5)
         opciones.addWidget(self.input_segundos)
         opciones.addStretch()
         layout.addLayout(opciones)
