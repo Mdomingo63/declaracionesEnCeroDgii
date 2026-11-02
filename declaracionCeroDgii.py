@@ -22,12 +22,9 @@ import json
 import sys
 import keyring
 from pathlib import Path
-from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
@@ -58,10 +55,7 @@ def cargar_rncs():
         return json.load(f)
 
 
-RNCS = cargar_rncs()
-
-
-def cargar_usuarios():
+def cargar_usuarios(rncs):
     """
     Construye la lista de usuarios a procesar, recuperando cada clave
     desde el keyring del sistema. Si a algún RNC le falta la clave
@@ -70,7 +64,7 @@ def cargar_usuarios():
     usuarios = []
     faltantes = []
 
-    for rnc in RNCS:
+    for rnc in rncs:
         clave = keyring.get_password(SERVICIO, rnc)
         if clave is None:
             faltantes.append(rnc)
@@ -202,15 +196,15 @@ def procesar_mensajes_dgii(driver):
         print(f"⚠️ Error procesando mensajes DGII: {e}")
 
 
-def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
+def presentar_declaracion(driver, index_impuesto, escribir_periodo=True, log=print):
     # Verificar que el menú esté disponible y hacer clic
     try:
         WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.ID, "2187"))
         ).click()
     except Exception as e:
-        print(f"⚠️  Menú principal no disponible: {e}")
-        return
+        log(f"⚠️  Menú principal no disponible: {e}")
+        return False
 
     # Verificar que el formulario esté disponible
     try:
@@ -218,8 +212,8 @@ def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
             EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_ddlImpuesto"))
         )
     except Exception as e:
-        print(f"⚠️  Formulario no disponible: {e}")
-        return
+        log(f"⚠️  Formulario no disponible: {e}")
+        return False
 
     Select(driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_ddlImpuesto")).select_by_index(index_impuesto)
 
@@ -231,16 +225,16 @@ def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
             input_periodo.clear()
             input_periodo.send_keys(periodo)
         except Exception as e:
-            print(f"⚠️  Campo período no disponible: {e}")
-            return
+            log(f"⚠️  Campo período no disponible: {e}")
+            return False
 
     try:
         WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.ID, "ctl00_ContentPlaceHolder1_btnPresentar"))
         ).click()
     except Exception as e:
-        print(f"⚠️  Botón presentar no disponible: {e}")
-        return
+        log(f"⚠️  Botón presentar no disponible: {e}")
+        return False
 
     # Regresar al menú principal solo si no es el último formulario (paso 4)
     if escribir_periodo:
@@ -253,89 +247,38 @@ def presentar_declaracion(driver, index_impuesto, escribir_periodo=True):
                 EC.element_to_be_clickable((By.XPATH, '//*[@id="menus"]/li[1]/a'))
             ).click()
         except Exception as e:
-            print(f"⚠️  No se pudo regresar al menú principal: {e}")
+            log(f"⚠️  No se pudo regresar al menú principal: {e}")
+            return False
+
+    return True
+
+
+def presentar_declaraciones_cero(driver, log=print):
+    declaraciones = (
+        ("IR3", 1, True),
+        ("606", 3, True),
+        ("607", 4, True),
+        ("ITBIS", 2, False),
+    )
+    for nombre, index_impuesto, escribir_periodo in declaraciones:
+        log(f"Presentando declaración {nombre}.")
+        if not presentar_declaracion(
+            driver,
+            index_impuesto=index_impuesto,
+            escribir_periodo=escribir_periodo,
+            log=log,
+        ):
+            log(f"❌ Se detuvo el proceso; no se pudo completar {nombre}.")
+            return False
+    log("✅ Declaraciones en cero completadas.")
+    return True
 
 
 def main():
-    usuarios = cargar_usuarios()
+    from eliminarMensajesDgii import main as ejecutar_flujo_por_usuario
 
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    for user in usuarios:
-        try:
-            print(f"🔐 Iniciando sesión con RNC: {user['rnc']}")
-
-            # Ir siempre a la página de login antes de cada usuario
-            driver.get("https://dgii.gov.do/OFV/login.aspx")
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-                )
-            except Exception as e:
-                print(f"❌ No se encontró campo usuario para RNC {user['rnc']}: {e}")
-                continue
-
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").clear()
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtUsuario").send_keys(user["rnc"])
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").clear()
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_txtPassword").send_keys(user["clave"])
-            driver.find_element(By.ID, "ctl00_ContentPlaceHolder1_BtnAceptar").click()
-
-            # Verificar si el login fue exitoso
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "2187"))
-                )
-            except Exception as e:
-                print(f"❌ Login fallido para RNC {user['rnc']}: {e}")
-                continue
-
-            # Procesar mensajes únicamente después de confirmar el login.
-            procesar_mensajes_dgii(driver)
-
-            # Paso 1: IR3
-            presentar_declaracion(driver, index_impuesto=1)
-
-            # Paso 2: 606
-            presentar_declaracion(driver, index_impuesto=3)
-
-            # Paso 3: 607
-            presentar_declaracion(driver, index_impuesto=4)
-
-            # Paso 4: ITBIS (NO escribir período, solo hacer clic en presentar)
-            presentar_declaracion(driver, index_impuesto=2, escribir_periodo=False)
-
-            # Cerrar sesión
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, '//*[@id="menus"]/li[5]/a'))
-                ).click()
-            except Exception as e:
-                print(f"⚠️  No se pudo cerrar sesión para RNC {user['rnc']}: {e}")
-
-            # Esperar a que vuelva la pantalla de login antes de continuar con el siguiente usuario
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-                )
-            except Exception as e:
-                print(f"⚠️  No volvió a la pantalla de login para RNC {user['rnc']}: {e}")
-
-        except Exception as e:
-            print(f"❌ Error general con RNC {user['rnc']}: {e}")
-            try:
-                driver.get("https://dgii.gov.do/OFV/login.aspx")
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "ctl00_ContentPlaceHolder1_txtUsuario"))
-                )
-            except Exception:
-                pass
-
-    driver.quit()
-    print("✅ Proceso completado.")
+    return ejecutar_flujo_por_usuario(presentar_declaraciones=presentar_declaraciones_cero)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

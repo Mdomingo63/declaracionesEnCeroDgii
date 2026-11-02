@@ -62,11 +62,13 @@ class AutomationWorker(QThread):
     finished_signal = Signal(str)
     review_signal = Signal(str, str, int, int)
 
-    def __init__(self, cuentas, segundos_revision):
+    def __init__(self, cuentas, segundos_revision, presentar_declaraciones=None):
         super().__init__()
         self.cuentas = cuentas
         self.segundos_revision = segundos_revision
+        self.presentar_declaraciones = presentar_declaraciones
         self.driver: Optional[WebDriver] = None
+        self._sesion_activa = False
         self._decision_event = threading.Event()
         self._stop_event = threading.Event()
         self._decision = None
@@ -91,12 +93,16 @@ class AutomationWorker(QThread):
                     break
                 try:
                     nombre, revisados, eliminados = self._procesar_cuenta(rnc, clave)
-                    resultados.append(
+                    resultado = (
                         f"{rnc} ({nombre}): {revisados} revisados, {eliminados} eliminados"
                     )
+                    if self.presentar_declaraciones is not None and not self._stop_event.is_set():
+                        resultado += "; declaraciones en cero procesadas"
+                    resultados.append(resultado)
                 except Exception as e:
                     resultados.append(f"{rnc}: error ({e})")
                     self.log(f"{rnc}: no se pudo completar la cuenta ({e})")
+                finally:
                     self._cerrar_sesion()
             estado = "Detenido por el usuario. " if self._stop_event.is_set() else "Proceso terminado. "
             self.finished_signal.emit(estado + " | ".join(resultados))
@@ -130,7 +136,10 @@ class AutomationWorker(QThread):
         revisados, eliminados = self._procesar_mensajes(usuario, nombre)
         if notificaciones == 0 and revisados == 0 and not self._stop_event.is_set():
             self.log(f"{nombre}: sin notificaciones ni mensajes; se pasa a la siguiente cuenta.")
-        self._cerrar_sesion()
+        if self.presentar_declaraciones is not None and not self._stop_event.is_set():
+            self.log(f"{nombre}: iniciando las declaraciones en cero.")
+            if not self.presentar_declaraciones(self._driver(), log=self.log):
+                raise RuntimeError("no se pudieron completar todas las declaraciones en cero")
         return nombre, revisados, eliminados
 
     # ------------------------------------------------------------------
@@ -161,6 +170,7 @@ class AutomationWorker(QThread):
         contribuyente = self._visible(XPATH_CONTRIBUYENTE, 20)
         if contribuyente is None:
             raise RuntimeError("no se confirmó el inicio de sesión")
+        self._sesion_activa = True
         return contribuyente.text.strip()
 
     def _esperar_token(self, campo_token):
@@ -374,10 +384,14 @@ class AutomationWorker(QThread):
         self.driver = webdriver.Chrome(options=options)
 
     def _cerrar_sesion(self):
-        if self.driver is None:
+        if self.driver is None or not self._sesion_activa:
             return
         try:
             self._click(XPATH_SALIR, 5)
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, XPATH_USUARIO))
+            )
+            self._sesion_activa = False
             self.log("Sesión cerrada correctamente.")
             self._stop_event.wait(2)
         except (TimeoutException, WebDriverException):
@@ -397,9 +411,11 @@ class AutomationWorker(QThread):
 # Interfaz gráfica con PySide6
 # ======================================================================
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, presentar_declaraciones=None):
         super().__init__()
-        self.setWindowTitle("DGII - Automatización de Mensajes")
+        self.presentar_declaraciones = presentar_declaraciones
+        titulo = "Mensajes y Declaraciones en Cero" if presentar_declaraciones else "Automatización de Mensajes"
+        self.setWindowTitle(f"DGII - {titulo}")
         self.setMinimumSize(650, 550)
         self.worker = None
         self.revision_pendiente = False
@@ -486,7 +502,11 @@ class MainWindow(QMainWindow):
         self.btn_iniciar.setEnabled(False)
         self.btn_detener.setEnabled(True)
         self.input_segundos.setEnabled(False)
-        self.worker = AutomationWorker(cuentas, self.input_segundos.value())
+        self.worker = AutomationWorker(
+            cuentas,
+            self.input_segundos.value(),
+            presentar_declaraciones=self.presentar_declaraciones,
+        )
         self.worker.log_signal.connect(self._agregar_log)
         self.worker.review_signal.connect(self._mostrar_revision)
         self.worker.finished_signal.connect(self._proceso_finalizado)
@@ -549,8 +569,12 @@ class MainWindow(QMainWindow):
 # ======================================================================
 # Punto de entrada
 # ======================================================================
-if __name__ == "__main__":
+def main(presentar_declaraciones=None):
     app = QApplication(sys.argv)
-    ventana = MainWindow()
+    ventana = MainWindow(presentar_declaraciones=presentar_declaraciones)
     ventana.show()
-    sys.exit(app.exec())
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
